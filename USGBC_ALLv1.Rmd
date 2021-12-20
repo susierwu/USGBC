@@ -1,0 +1,1079 @@
+---
+title: "USGBC Project Mapping"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: readable 
+    source_code: "https://github.com/susierwu/USGBC_MAP"  
+    navbar:
+      - {title: "Contact", icon: "fa-envelope", href: "mailto:sw@susdatability.com", align: right}
+    orientation: columns
+    vertical_layout: fill
+runtime: shiny
+---
+
+<style>                     
+.navbar {
+  background-color: #acbdd2;
+</style>   
+
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyr)
+library(leaflet)
+library(rgeos)
+library(spData)
+library(maps)
+library(mapproj)
+library(geojson)
+library(geojsonio)
+library(rio)
+library(countrycode)
+library(rgeos)
+library(magrittr)
+library(hchinamap)
+library(dygraphs)
+library(lubridate)
+library(rworldmap)
+library(xts)          
+library(tidyverse)
+library(htmltools)
+library(ggplot2)
+library(dplyr)
+library(hrbrthemes)
+library(shiny)
+library(shinydashboardPlus)
+library(dashboardthemes)
+library(rintrojs)
+library(shinyBS)
+library(shinycssloaders)
+library(shinyjs)
+library(shinyWidgets)
+library(tigris) 
+options(tigris_use_cache = TRUE)
+```
+
+
+
+```{r global, include=FALSE}
+ # load data in 'global' chunk so it can be shared by all users of the dashboard
+ wmap <- getMap(resolution="coarse")
+ 
+ #for real-time up-to-date project data, use below codes:
+ # url <- "https://usgbc-projects.s3.amazonaws.com/PublicLEEDProjectDirectory.xlsx"
+ # data = rio::import(url)
+
+
+# NOTE: At the time of writing the code, LEED Project sheet used "GrossSqFoot", later it updated to "GrossFloorArea", this is already fixed in the code.
+# For future adoption, if you find code not running, pls check the name and make necessary changes. 
+ data <- read.csv("Data/PublicLEEDProjectDirectory.csv", header = T, stringsAsFactors = FALSE)
+ certdata = data[which(data$IsCertified == 'Yes'),]
+ 
+ load('Data/chinadf.rda', verbose = TRUE)
+ china <- chinadf %>%
+   dplyr::filter(region == "China")
+ china$Engname <- c("Beijing","Tianjin","Hebei","Shanxi","Nei Mongol","Liaoning","Jilin","Heilongjiang","Shanghai",   
+                    "Jiangsu","Zhejiang","Anhui","Fujian","Jiangxi","Shandong","Henan","Hubei","Hunan",     
+                    "Guangdong","Guangxi","Hainan","Chongqing","Sichuan","Guizhou","Yunnan","Tibet","Shaanxi",
+                    "Gansu","Qinghai","Ningxia","Xinjiang","Taiwan","HK","Macau","Nanhaizhudao")
+```
+
+
+
+Global_Map {data-orientation=columns data-icon="fa-map-marker-alt" data-navmenu="GLOBAL"}
+=====================================  
+```{r include = FALSE}
+#define functions, to be used in mapping 
+#mapping GSF, US GSF is deleted during quantile(), for it is an outlier
+GLOGBGSF_breaks <- function(GBlist, break_num) {
+  bins <- GBbreaks <- c() 
+  n <- ifelse(break_num==8, 7, (ifelse(break_num==7, 6,5)))
+  if(break_num == 8){
+    qqd<-round(quantile(GBlist[-which(GBlist == max(GBlist,na.rm = T))], probs = seq(0, 1, 0.14), na.rm = TRUE),0)
+  } else if (break_num == 7) {
+    qqd<-round(quantile(GBlist[-which(GBlist == max(GBlist,na.rm = T))], probs = seq(0, 1, 0.16), na.rm = TRUE),0)
+  } else if (break_num == 6) {
+    qqd<-round(quantile(GBlist[-which(GBlist == max(GBlist,na.rm = T))], probs = seq(0, 1, 0.19), na.rm = TRUE),0)
+  }
+  for (i in 1:n) {
+    GBbreaks[i] = qqd[i+1]
+  }
+  bins <- c(0, GBbreaks, Inf)
+  return(bins)
+}
+
+#mapping GB count, ~100 countries has <5 total GB, delete them first then do quantile for the rest
+GLOGBcount_breaks <- function(GBlist, break_num) {
+  bins <- GBbreaks <- c() 
+  GBbreaks[1] <- 5
+    if(break_num == 8){
+       qqq<-round(quantile(GBlist[which(GBlist >= 10)], probs = seq(0, 1, 0.19), na.rm = TRUE),0)
+       for (i in 2:7) {
+         GBbreaks[i] = qqq[i-1]
+       }
+    } else if (break_num == 7) {
+      qqq<-round(quantile(GBlist[which(GBlist >= 10)], probs = seq(0, 1, 0.23), na.rm = TRUE),0)
+      for (i in 2:6) {
+        GBbreaks[i] = qqq[i-1]
+      }
+    } else if (break_num == 6) {
+      qqq<-round(quantile(GBlist[which(GBlist >= 10)], probs = seq(0, 1, 0.3), na.rm = TRUE),0)
+      for (i in 2:5) {
+        GBbreaks[i] = qqq[i-1]
+      }
+    }
+  bins <- c(0, GBbreaks, Inf)
+  return(bins)
+}
+```
+
+```{r include = FALSE}
+cert_bycountry <- as.data.frame(table(certdata$Country))   #total 141 countries, opposed to 180 as ALL (incl.certi,denied,notcerti)
+```
+
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+### Input Parameters
+Data visualization for global cumulative USGBC-certified green buildings 
+```{r echo=FALSE}
+selectInput("bins_num", label = "How many bins to display for the two maps:",
+            choices = c("default (fixed value)" ="default", "6 bins" = 6,  "7 bins"=7, "8 bins" =8), selected = "default")
+``` 
+Note: users choose how to map the GSF and total number of green bldg. Because the data is highly skewed (e.g., around 100 countries have only one certified bldg), we offer several options for visualization. Default option is with fixed values for each bin. Alternatively, for mapping bldg numbers, countries with less than 5 & 10 green buildings are mapped first, then the rest countries are seperated into pre-defined quantiles with same number of countries for each break. For mapping the total GSF, the US data (outlier) is not taken into account in the quantile() function.
+
+
+```{r echo=FALSE}
+certified_pctg <- reactive({ 
+  certified_pctg <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      certified_pctg[i] <-  round(nrow(subset(certdata,Country==cert_bycountry$Var1[i] & CertLevel == "Certified"))/cert_bycountry[i,2],2)
+    }
+  certified_pctg
+})
+
+silver_pctg <- reactive({ 
+  silver_pctg <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      silver_pctg[i] <- round(nrow(subset(certdata,Country==cert_bycountry$Var1[i] & CertLevel == "Silver"))/cert_bycountry[i,2],2)
+    }
+  silver_pctg
+})
+
+gold_pctg <- reactive({ 
+  gold_pctg <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      gold_pctg[i] <- round(nrow(subset(certdata,Country==cert_bycountry$Var1[i] & CertLevel == "Gold"))/cert_bycountry[i,2],2)
+    }
+  gold_pctg
+})
+
+platinum_pctg <- reactive({ 
+  platinum_pctg <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      platinum_pctg[i] <- round(nrow(subset(certdata,Country==cert_bycountry$Var1[i] & CertLevel == "Platinum"))/cert_bycountry[i,2],2)
+    }
+  platinum_pctg
+})
+```
+
+
+```{r echo=FALSE}
+#now adding GSF for all GB and by level
+totalGSF <- reactive({ 
+  totalGSF <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      totalGSF[i] <- sum(as.numeric(certdata[which(certdata$Country == cert_bycountry$Var1[i]),]$GrossFloorArea))
+    }
+  totalGSF
+})
+
+certified_GSF <- reactive({ 
+  certified_GSF <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      certified_GSF[i] <- sum(as.numeric(certdata[which(certdata$Country == cert_bycountry$Var1[i] & certdata$CertLevel == "Certified"),]$GrossFloorArea))
+    }
+  certified_GSF
+})
+
+silver_GSF <- reactive({ 
+  silver_GSF <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      silver_GSF[i] <- sum(as.numeric(certdata[which(certdata$Country == cert_bycountry$Var1[i] & certdata$CertLevel == "Silver"),]$GrossFloorArea))
+    }
+  silver_GSF
+})
+
+gold_GSF <- reactive({ 
+  gold_GSF <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      gold_GSF[i] <- sum(as.numeric(certdata[which(certdata$Country == cert_bycountry$Var1[i] & certdata$CertLevel == "Gold"),]$GrossFloorArea))
+    }
+  gold_GSF
+})
+
+platinum_GSF <- reactive({ 
+  platinum_GSF <- numeric(length(cert_bycountry))
+  for (i in 1:nrow(cert_bycountry)) {
+      platinum_GSF[i] <- sum(as.numeric(certdata[which(certdata$Country == cert_bycountry$Var1[i] & certdata$CertLevel == "Platinum"),]$GrossFloorArea))
+    }
+  platinum_GSF
+})
+```
+
+
+```{r echo=FALSE}
+#combining all GB count(total and by level%) and GSF (total and by level) into one dataframe. DO NOT change col order as used in MAP
+GLO_cum_GBnum <- reactive({ 
+     cbind(cert_bycountry, certified_pctg(),  silver_pctg(), gold_pctg(), platinum_pctg(), totalGSF(), certified_GSF(),  silver_GSF(), gold_GSF(), platinum_GSF())    #cert_bycountry has 2 col, then col3-6 (%bylevel), col7 totalGSF, col8-11 (GSFbylevel)
+})
+
+
+```
+
+
+```{r echo=FALSE}
+#to display GB GSF (col7 totalGSF, col8-11 GSF by level@GLO_cum_GBnum)
+USGBCGSF <- reactive({
+  USGBCGSF <- data.frame(id = wmap@data$ISO_A2, total_GSF = numeric(nrow(wmap)), certified_GSF = numeric(nrow(wmap)), silver_GSF = numeric(nrow(wmap)), gold_GSF = numeric(nrow(wmap)), plat_GSF = numeric(nrow(wmap)))
+  for (i in 1:nrow(wmap)) {
+  if(rlang::is_empty(which(wmap@data$ISO_A2[i] == GLO_cum_GBnum()[,1])) == F) { 
+    xx<-which(wmap@data$ISO_A2[i] == GLO_cum_GBnum()[,1])
+    USGBCGSF$total_GSF[i] <- GLO_cum_GBnum()[xx,7]
+    #USGBCGSF$total_GSF[i] <- formatC(as.numeric(GLO_cum_GBnum()[xx,7]), format = "e", digits = 1)
+    USGBCGSF$certified_GSF[i] <- GLO_cum_GBnum()[xx,8]
+    USGBCGSF$silver_GSF[i] <- GLO_cum_GBnum()[xx,9]
+    USGBCGSF$gold_GSF[i] <- GLO_cum_GBnum()[xx,10]
+    USGBCGSF$plat_GSF[i] <- GLO_cum_GBnum()[xx,11]
+  }else {
+    USGBCGSF$total_GSF[i] <- USGBCGSF$certified_GSF[i] <- USGBCGSF$silver_GSF[i] <- USGBCGSF$gold_GSF[i]<- USGBCGSF$plat_GSF[i]<- NA
+  }
+}
+  USGBCGSF
+})
+
+USGBCall <- reactive({
+  USGBCall <- data.frame(id = wmap@data$ISO_A2, count = numeric(nrow(wmap)), level_certified = numeric(nrow(wmap)), level_silver = numeric(nrow(wmap)), level_gold = numeric(nrow(wmap)), level_plat = numeric(nrow(wmap)))
+  for (i in 1:nrow(wmap)) {
+  if(rlang::is_empty(which(wmap@data$ISO_A2[i] == GLO_cum_GBnum()[,1])) == F) {         #cert_bycountry[,1]
+    xxx<-which(wmap@data$ISO_A2[i] == GLO_cum_GBnum()[,1])
+    USGBCall$count[i] <- GLO_cum_GBnum()[xxx,2]
+    USGBCall$level_certified[i] <- GLO_cum_GBnum()[xxx,3]
+    USGBCall$level_silver[i] <- GLO_cum_GBnum()[xxx,4]
+    USGBCall$level_gold[i] <- GLO_cum_GBnum()[xxx,5]
+    USGBCall$level_plat[i] <- GLO_cum_GBnum()[xxx,6]
+  }else {
+    USGBCall$count[i] <- USGBCall$level_certified[i] <- USGBCall$level_silver[i] <- USGBCall$level_gold[i]<- USGBCall$level_plat[i]<- NA
+  }
+}
+  USGBCall
+})
+```
+
+
+
+
+Column {.tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### Summary table 
+USGBC certified green buildings by country, total number, and total GSF (cumulative up-to-date)
+```{r echo=FALSE}
+GLO_all_dttable <- reactive({
+  GLO_all_dttable <- data.frame("Country"=GLO_cum_GBnum()[,1], "ALL_GB_count"=GLO_cum_GBnum()[,2], 
+                                "LEED_cert_pctg"=GLO_cum_GBnum()[,3],"LEED_silver_pctg"=GLO_cum_GBnum()[,4],
+                                "LEED_gold_pctg"=GLO_cum_GBnum()[,5],"LEED_platinum_pctg"=GLO_cum_GBnum()[,6],
+                                "ALL_GSF"=GLO_cum_GBnum()[,7],"cert_GSF"=GLO_cum_GBnum()[,8],
+                                "silver_GSF"=GLO_cum_GBnum()[,9],"gold_GSF"=GLO_cum_GBnum()[,10],
+                                "platinum_GSF"=GLO_cum_GBnum()[,11])
+})
+renderTable(GLO_all_dttable())
+```
+
+
+### Map (by GSF) 
+cumulative USGBC certified green buildings (by total GSF)
+```{r echo=FALSE}
+renderLeaflet({
+     if(input$bins_num == "default"){
+       bins <- c(0, 5e+04, 1e+05, 1e+06, 5e+06, 1e+07, 1e+08, 1e+09, Inf)
+     } else{
+       bins <- GLOGBGSF_breaks(USGBCGSF()$total_GSF,input$bins_num)
+     }
+     pal <- colorBin("YlOrRd", domain = as.numeric(USGBCGSF()$total_GSF), bins = bins)
+      mytext <- paste(
+        "Country: ", wmap@data$NAME,"<br/>", 
+        "Total_certified_GSF:", formatC(USGBCGSF()$total_GSF, format = "e", digits = 1), "<br/>", 
+          "-Level_certified_GSF:",formatC(USGBCGSF()$certified_GSF,format = "e",digits = 1), "<br/>", 
+          "-Level_silver_GSF:", formatC(USGBCGSF()$silver_GSF,format = "e",digits = 1), "<br/>", 
+          "-Level_gold_GSF:", formatC(USGBCGSF()$gold_GSF,format = "e",digits = 1), "<br/>", 
+          "-Level_platinum_GSF:", formatC(USGBCGSF()$plat_GSF,format = "e",digits = 1), "<br/>", 
+        sep="") %>%
+        lapply(htmltools::HTML)
+      
+      leaflet(wmap) %>%
+        setView(lat=10, lng=0 , zoom=2) %>%
+        addPolygons(
+          fillColor = ~pal(USGBCGSF()$total_GSF),
+          weight = 2,
+          opacity = 1,
+          color = "white",
+          dashArray = "3",
+          fillOpacity = 0.7,
+          label = mytext,
+          labelOptions = labelOptions(
+            style = list("font-weight" = "normal", padding = "3px 8px"),
+            textsize = "15px",
+            direction = "auto"))   %>%
+        addControl(paste("source: https://www.usgbc.org/projects up-to-date:", ymd_hms(max(certdata$CertDate))), position = "bottomright") %>%
+        leaflet::addLegend(pal = pal, values = ~USGBCGSF()$total_GSF, opacity = 0.7, title = "All certified GB (total GSF)", position = "bottomleft")
+    })
+```
+
+### Map (by numbers)  
+Cumulative USGBC certified green buildings (by numbers)
+```{r echo=FALSE}
+renderLeaflet({
+     if(input$bins_num == "default"){
+       bins <- c(0, 10, 50, 100, 200, 500, 1000, 3000, Inf)
+     } else{
+       bins <- GLOGBcount_breaks(USGBCall()$count,input$bins_num)
+     }
+      pal <- colorBin("YlOrRd", domain = as.numeric(USGBCall()$count), na.color = "#808080", bins = bins)
+      mytext <- paste(
+        "Country: ", wmap@data$NAME,"<br/>", 
+        "Total_certified_#: ", round(USGBCall()$count,0), "<br/>", 
+          "-Level_certified: ",scales::percent(USGBCall()$level_certified), "<br/>", 
+          "-Level_silver: ", scales::percent(USGBCall()$level_silver), "<br/>", 
+          "-Level_gold: ", scales::percent(USGBCall()$level_gold), "<br/>", 
+          "-Level_platinum: ", scales::percent(USGBCall()$level_plat), "<br/>", 
+        sep="") %>%
+        lapply(htmltools::HTML)
+      
+      leaflet(wmap) %>%
+        setView(lat=10, lng=0 , zoom=2) %>%
+        addPolygons(
+          fillColor = ~pal(USGBCall()$count),
+          weight = 2,
+          opacity = 1,
+          color = "white",
+          dashArray = "3",
+          fillOpacity = 0.7,
+          label = mytext,
+          labelOptions = labelOptions(
+            style = list("font-weight" = "normal", padding = "3px 8px"),
+            textsize = "15px",
+            direction = "auto"))   %>%
+        addControl(paste("source: https://www.usgbc.org/projects up-to-date:", ymd_hms(max(certdata$CertDate))), position = "bottomright") %>%
+        leaflet::addLegend(pal = pal, values = ~USGBCall()$count, opacity = 0.7, title = "All certified GB (numbers)", position = "bottomleft")
+    })
+```
+
+
+
+
+
+
+
+
+
+Global_Time {data-orientation=columns data-navmenu="GLOBAL" data-icon="fa-chart-line"}
+=====================================    
+```{r include = FALSE}
+#define functions for TMcountries
+TMcountryfunc <- function(inputcountry) {
+  TMcountry <- certdata[which(certdata$Country == inputcountry),]
+  TMcountry$yearmonth <- as.yearmon(TMcountry$CertDate)
+  return(TMcountry)
+}
+
+yearmonth_GBcountfunc <- function(TMcountry) {
+  yearmonth_GBcount <- c()
+    for (i in 1:length(unique(TMcountry$yearmonth))) { 
+    yearmonth_GBcount[i] <- nrow(TMcountry[which(TMcountry$yearmonth == unique(TMcountry$yearmonth)[i]),])
+  }
+  return(yearmonth_GBcount)
+}
+
+yearmonth_GSFfunc <- function(TMcountry) {
+  yearmonth_GSF <- c()
+    for (i in 1:length(unique(TMcountry$yearmonth))) { 
+    yearmonth_GSF[i]<-sum(as.numeric(TMcountry[which(TMcountry$yearmonth==unique(TMcountry$yearmonth)[i]),]$GrossFloorArea))
+  }
+  return(yearmonth_GSF)
+}
+
+GBfinaldtFunc <- function(TMcountry,yearmonth_GBcount,yearmonth_GSF){
+    GBfinaldt <- data.frame(Time = unique(TMcountry$yearmonth), GB_count=yearmonth_GBcount,GSF=yearmonth_GSF)
+    #colnames(GBfinaldt) <- c("Time", "GB_count", "GSF")
+  return(GBfinaldt)
+}
+  
+MyMerge <- function(x, y){
+  df <- merge(x, y, by= "Time", all = TRUE)
+  return(df)
+}
+
+Mycumsum <- function(x){
+  y <- cumsum(ifelse(is.na(x), 0, x)) #+ x*0
+  return(y)
+}
+```
+
+
+```{r include = FALSE}
+qqd <- data.frame(wmap@data$ISO_A2, wmap@data$NAME)
+#szd <- setdiff(qqd[,1], dt$Country)      #incl. both YES&NO ALL certified data
+szd <- setdiff(qqd[,1], certdata$Country)
+#setdiff(dt$Country,qqd[,1])   # "AN" "RE" "UM" "XK" "YU": 5 countries in USGBC list not identified and deleted 
+qqdszd <- qqd[-which(qqd[,1] %in% szd),]
+countrycode <- sort(qqdszd[,1])
+countrycodename <- sort(paste(qqdszd[,1], "->", qqdszd[,2]))
+```
+
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+### Input Parameters
+Time series for USGBC-certified green buildings in the selected country
+```{r echo=FALSE}
+selectizeInput('compcountries', 'Choose up to five countries for time series chart', choices = countrycode, selected = c("AE", "BR",  "CA", "IN", "CN"), multiple = TRUE)
+selectizeInput('whichcountry2', 'Following is a match between country code and name to aid your selection:', choices = countrycodename, multiple = TRUE)
+selectInput("color", "Choose color scheme for charts", list("set1" = "Set1", "set2" = "Set2", "dark" = "Dark2", "pair" = "Paired", "accent" = "Accent", "red-green" = "RdYlGn", "red-blue" = "RdBu", "purple-green" = "PRGn", "spectral" = "Spectral"))
+``` 
+Note: The uplimit number of selected countries is set to five for better figure quality, you may choose 2-5 different countries for comparison.
+
+
+```{r echo=FALSE}
+TMcountry1 <- reactive({TMcountry1 <- TMcountryfunc(input$compcountries[1])})
+TMcountry2 <- reactive({TMcountry2 <- TMcountryfunc(input$compcountries[2])})
+TMcountry3 <- reactive({TMcountry3 <- TMcountryfunc(input$compcountries[3])})
+TMcountry4 <- reactive({TMcountry4 <- TMcountryfunc(input$compcountries[4])})
+TMcountry5 <- reactive({TMcountry5 <- TMcountryfunc(input$compcountries[5])})
+```
+
+```{r echo=FALSE}
+yearmonth_GBcount1 <- reactive({yearmonth_GBcount1 <- yearmonth_GBcountfunc(TMcountry1())})
+yearmonth_GBcount2 <- reactive({yearmonth_GBcount2 <- yearmonth_GBcountfunc(TMcountry2())})
+yearmonth_GBcount3 <- reactive({yearmonth_GBcount3 <- yearmonth_GBcountfunc(TMcountry3())})
+yearmonth_GBcount4 <- reactive({yearmonth_GBcount4 <- yearmonth_GBcountfunc(TMcountry4())})
+yearmonth_GBcount5 <- reactive({yearmonth_GBcount5 <- yearmonth_GBcountfunc(TMcountry5())})
+```
+
+```{r echo=FALSE}
+yearmonth_GSF1 <- reactive({yearmonth_GSF1 <- yearmonth_GSFfunc(TMcountry1())})
+yearmonth_GSF2 <- reactive({yearmonth_GSF2 <- yearmonth_GSFfunc(TMcountry2())})
+yearmonth_GSF3 <- reactive({yearmonth_GSF3 <- yearmonth_GSFfunc(TMcountry3())})
+yearmonth_GSF4 <- reactive({yearmonth_GSF4 <- yearmonth_GSFfunc(TMcountry4())})
+yearmonth_GSF5 <- reactive({yearmonth_GSF5 <- yearmonth_GSFfunc(TMcountry5())})
+```
+
+```{r echo=FALSE}
+GB_finaldt1 <- reactive({GB_finaldt1 <-  GBfinaldtFunc(TMcountry1(),yearmonth_GBcount1(),yearmonth_GSF1())})
+GB_finaldt2 <- reactive({GB_finaldt2 <-  GBfinaldtFunc(TMcountry2(),yearmonth_GBcount2(),yearmonth_GSF2())})
+GB_finaldt3 <- reactive({GB_finaldt3 <-  GBfinaldtFunc(TMcountry3(),yearmonth_GBcount3(),yearmonth_GSF3())})
+GB_finaldt4 <- reactive({GB_finaldt4 <-  GBfinaldtFunc(TMcountry4(),yearmonth_GBcount4(),yearmonth_GSF4())})
+GB_finaldt5 <- reactive({GB_finaldt5 <-  GBfinaldtFunc(TMcountry5(),yearmonth_GBcount5(),yearmonth_GSF5())})
+```
+
+```{r echo=FALSE}
+GB_GSFall <- reactive({  
+  if (length(input$compcountries)==2){
+    GB_GSFall <- merge(GB_finaldt1()[,c(1,3)], GB_finaldt2()[,c(1,3)], by="Time", all = T)
+    colnames(GB_GSFall) <- c("Time",input$compcountries[1],input$compcountries[2])
+  }else if (length(input$compcountries)==3){
+   GB_GSFall <- Reduce(MyMerge, list(GB_finaldt1()[,c(1,3)], GB_finaldt2()[,c(1,3)], GB_finaldt3()[,c(1,3)]))
+   colnames(GB_GSFall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3])
+  }else if (length(input$compcountries)==4){
+  GB_GSFall <- Reduce(MyMerge, list(GB_finaldt1()[,c(1,3)], GB_finaldt2()[,c(1,3)], GB_finaldt3()[,c(1,3)], GB_finaldt4()[,c(1,3)]))
+  colnames(GB_GSFall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3],input$compcountries[4])
+  }else if (length(input$compcountries)==5){
+  GB_GSFall <- Reduce(MyMerge, list(GB_finaldt1()[,c(1,3)], GB_finaldt2()[,c(1,3)], GB_finaldt3()[,c(1,3)], GB_finaldt4()[,c(1,3)],GB_finaldt5()[,c(1,3)]))
+  colnames(GB_GSFall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3],input$compcountries[4],input$compcountries[5])
+  }
+  GB_GSFall <- subset(GB_GSFall, !is.na(GB_GSFall[,1]))
+})
+```
+
+```{r echo=FALSE}
+GB_countall <- reactive({  
+  if (length(input$compcountries)==2){
+    GB_countall <- merge(GB_finaldt1()[,1:2], GB_finaldt2()[,1:2], by="Time", all = T)
+    colnames(GB_countall) <- c("Time",input$compcountries[1],input$compcountries[2])
+  }else if (length(input$compcountries)==3){
+   GB_countall <- Reduce(MyMerge, list(GB_finaldt1()[,1:2], GB_finaldt2()[,1:2], GB_finaldt3()[,1:2]))
+   colnames(GB_countall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3])
+  }else if (length(input$compcountries)==4){
+  GB_countall <- Reduce(MyMerge, list(GB_finaldt1()[,1:2], GB_finaldt2()[,1:2], GB_finaldt3()[,1:2], GB_finaldt4()[,1:2]))
+  colnames(GB_countall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3],input$compcountries[4])
+  }else if (length(input$compcountries)==5){
+  GB_countall <- Reduce(MyMerge, list(GB_finaldt1()[,1:2], GB_finaldt2()[,1:2], GB_finaldt3()[,1:2], GB_finaldt4()[,1:2],GB_finaldt5()[,1:2]))
+  colnames(GB_countall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3],input$compcountries[4],input$compcountries[5])
+  }
+  GB_countall <- subset(GB_countall, !is.na(GB_countall[,1]))
+})
+```
+
+```{r echo=FALSE}
+GB_countplot <- reactive({  
+  GB_countplot  <- xts(x = GB_countall()[,-1], order.by = GB_countall()[,1])
+})
+```
+
+```{r echo=FALSE}
+GB_GSFplot <- reactive({  
+  GB_GSFplot  <- xts(x = GB_GSFall()[,-1], order.by = GB_GSFall()[,1])
+})
+```
+
+
+```{r echo=FALSE}
+GB_cumcountall <- reactive({  
+  if (length(input$compcountries)==2){
+    GB_cumcountall <- cbind(GB_countall()[,1], Mycumsum(GB_countall()[,2]), Mycumsum(GB_countall()[,3]))
+    colnames(GB_cumcountall) <- c("Time",input$compcountries[1],input$compcountries[2])
+  }else if (length(input$compcountries)==3){
+   GB_cumcountall <- cbind(GB_countall()[,1], Mycumsum(GB_countall()[,2]), Mycumsum(GB_countall()[,3]), Mycumsum(GB_countall()[,4]))
+   colnames(GB_cumcountall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3])
+  }else if (length(input$compcountries)==4){
+  GB_cumcountall <- cbind(GB_countall()[,1], Mycumsum(GB_countall()[,2]), Mycumsum(GB_countall()[,3]), Mycumsum(GB_countall()[,4]),Mycumsum(GB_countall()[,5]))
+  colnames(GB_cumcountall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3],input$compcountries[4])
+  }else if (length(input$compcountries)==5){
+  GB_cumcountall <- cbind(GB_countall()[,1], Mycumsum(GB_countall()[,2]), Mycumsum(GB_countall()[,3]), Mycumsum(GB_countall()[,4]),Mycumsum(GB_countall()[,5]),Mycumsum(GB_countall()[,6]))
+  colnames(GB_cumcountall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3],input$compcountries[4],input$compcountries[5])
+  }
+  GB_cumcountall <- subset(GB_cumcountall, !is.na(GB_cumcountall[,1]))
+})
+```
+
+
+```{r echo=FALSE}
+GB_cumGSFall <- reactive({  
+  if (length(input$compcountries)==2){
+    GB_cumGSFall <- cbind(GB_GSFall()[,1], Mycumsum(GB_GSFall()[,2]), Mycumsum(GB_GSFall()[,3]))
+    colnames(GB_cumGSFall) <- c("Time",input$compcountries[1],input$compcountries[2])
+  }else if (length(input$compcountries)==3){
+   GB_cumGSFall <- cbind(GB_GSFall()[,1], Mycumsum(GB_GSFall()[,2]), Mycumsum(GB_GSFall()[,3]), Mycumsum(GB_GSFall()[,4]))
+   colnames(GB_cumGSFall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3])
+  }else if (length(input$compcountries)==4){
+  GB_cumGSFall <- cbind(GB_GSFall()[,1], Mycumsum(GB_GSFall()[,2]), Mycumsum(GB_GSFall()[,3]), Mycumsum(GB_GSFall()[,4]),Mycumsum(GB_GSFall()[,5]))
+  colnames(GB_cumGSFall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3],input$compcountries[4])
+  }else if (length(input$compcountries)==5){
+  GB_cumGSFall <- cbind(GB_GSFall()[,1], Mycumsum(GB_GSFall()[,2]), Mycumsum(GB_GSFall()[,3]), Mycumsum(GB_GSFall()[,4]),Mycumsum(GB_GSFall()[,5]),Mycumsum(GB_GSFall()[,6]))
+  colnames(GB_cumGSFall) <- c("Time",input$compcountries[1],input$compcountries[2],input$compcountries[3],input$compcountries[4],input$compcountries[5])
+  }
+  GB_cumGSFall <- subset(GB_cumGSFall, !is.na(GB_cumGSFall[,1]))
+})
+```
+
+
+```{r echo=FALSE}
+GB_cumcountplot <- reactive({  
+  GB_cumcountplot <- xts(x = GB_cumcountall()[,-1], order.by = GB_countall()[,1])
+})
+```
+
+```{r echo=FALSE}
+GB_cumGSFplot <- reactive({  
+  GB_cumGSFplot <- xts(x = GB_cumGSFall()[,-1], order.by = GB_countall()[,1])
+})
+```
+
+
+Column {data-width=650 data-padding=5}
+-----------------------------------------------------------------------
+```{r echo=FALSE}
+#### two plots together, can't scale to same page
+renderUI({
+  dy_graph <- list(
+      dygraphs::dygraph(GB_countplot(), width=600, height=400, group="GB-yearmonth", main=paste("Certified buildings (numbers) at selected countries at certain time")) %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(length(input$compcountries), input$color)),
+      dygraphs::dygraph(GB_GSFplot(), width=600, height=400, group="GB-yearmonth", main=paste("Certified buildings (GSF) at selected countries at certain time")) %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(length(input$compcountries), input$color))
+)
+htmltools::browsable(htmltools::tagList(dy_graph))
+#splitLayout(cellWidths = c("50%"), dygraphOutput(dy_graph[1]), dygraphOutput(dy_graph[2]))
+})
+```
+
+Column {data-width=950 data-padding=5} 
+-----------------------------------------------------------------------
+```{r echo=FALSE, fig.height= 6}
+#### two plots together, can't scale to same page
+renderUI({
+  dy_graph <- list(
+      dygraphs::dygraph(GB_cumcountplot(), width=600, height=400, group="GB-yearmonth", main=paste("Cumulative certified buildings (numbers) at selected countries")) %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(length(input$compcountries), input$color)),
+      dygraphs::dygraph(GB_cumGSFplot(), width=600, height=400, group="GB-yearmonth", main=paste("Cumulative certified buildings (GSF) at selected countries")) %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(length(input$compcountries), input$color))
+    )
+htmltools::browsable(htmltools::tagList(dy_graph))
+#  tagList(dy_graph)
+})
+```
+
+
+
+
+
+Comp_LEEDlevel {data-orientation=rows data-navmenu="GLOBAL" data-icon="fa-chart-bar" }
+=====================================     
+
+```{r include = FALSE}
+cert_bycountry <- as.data.frame(table(certdata$Country))   #total 141 countries, opposed to 180 as ALL (incl.certi,denied,notcerti)
+```
+
+
+Column {.sidebar data-width=250}
+-------------------------------------
+### Input Parameters
+To show the relative percentage between different LEED levels for selected countries 
+```{r echo=FALSE}
+numericInput("comparenum", "Choose countries with over how many cumulative certified bldg (e.g., >50) to compare the relative percentage between different LEED levels (shown in the right Chart):", 100, min = 50, max = 150)
+br()
+# bsButton(inputId = "glo_all_llolip", label = "Glo_comp_analysis",  icon = icon("chart-bar"),  style = "success")
+# br()
+``` 
+Note: When you select number of total cumulative certified bldg (e.g., >50), the larger number you selected, the fewer output countries you will get for those of who can meet the input requirement will be reduced as you increase the minimum total cumulative certified bldg.
+
+```{r echo=FALSE}
+#same GLO_cum_GBnum as in page1
+GLO_cum_GBnum <- reactive({ 
+     cbind(cert_bycountry, certified_pctg(),  silver_pctg(), gold_pctg(), platinum_pctg(), totalGSF(), certified_GSF(),  silver_GSF(), gold_GSF(), platinum_GSF())    #cert_bycountry has 2 col, then col3-6 (%bylevel), col7 totalGSF, col8-11 (GSFbylevel)
+})
+
+
+#dataframe for comparing % of LEED-levels for selected countries 
+comparelevel <- reactive({ 
+  comparelevel <- subset(GLO_cum_GBnum(), GLO_cum_GBnum()[,2] > input$comparenum) %>%  select(1:6)
+  comparelevel
+})
+
+avelevelcum <- reactive({ 
+  avelevelcum <- cumsum(c(ave(comparelevel()[,3])[1],ave(comparelevel()[,4])[1],ave(comparelevel()[,5])[1]))
+  avelevelcum
+})
+```
+
+
+Row {data-height=220}
+-------------------------------------
+### Chart A
+```{r echo=FALSE}
+a <- round(sum(as.numeric(certdata$GrossFloorArea))/10^9,2)
+flexdashboard::valueBox(a, caption = paste("Total billions (10^9) GSF of certified bldgs globally until:", ymd_hms(max(certdata$CertDate))), icon="fa-calendar-check")
+```
+
+### Chart A
+```{r echo=FALSE}
+aa <- nrow(certdata)
+flexdashboard::valueBox(aa, caption = paste("Total number of certified bldgs globally until:", ymd_hms(max(certdata$CertDate))), icon="fa-building", color = "#e96449")
+```
+
+### Chart A
+```{r echo=FALSE}
+aa <- nrow(cert_bycountry)
+flexdashboard::valueBox(aa, caption = paste("Total countries in the world has certified green buildings until:", ymd_hms(max(certdata$CertDate))), icon="fa-globe", color = "#fdc23a")
+```
+
+### Chart A
+```{r echo=FALSE}
+aa <- round(ave(cert_bycountry[-which(cert_bycountry[,2] == max(cert_bycountry[,2])),2])[1],0)
+flexdashboard::valueBox(aa, caption = paste("Average number of cumulative certified bldgs for each country (excl. the US) until:", ymd_hms(max(certdata$CertDate))), icon="fa-atlas", color = "#8db600")
+```
+
+
+Row {data-height=850}
+-------------------------------------
+### Lollipop plot
+The plot shows relative percentage of each LEED level for all cumulativly certified bldgs in selected countries (top ones with a certain number of total certified bldgs cumulativly as user defined). 
+Dashed line is the average percentage of different LEED levels for all selected countries. 
+Color indicator by LEED-level: certified-green | silver-orange | gold-turquoise | platinum - violetred.
+```{r echo=FALSE}
+renderPlot({
+  ggplot(comparelevel()) +
+  geom_segment(aes(x=Var1, xend=Var1, y=0, yend=1), color="darkgrey", size=0.8) +
+  geom_point(aes(x=Var1, y=comparelevel()[,3]), color="green4", size=3 ) +
+  geom_point(aes(x=Var1, y=comparelevel()[,3]+comparelevel()[,4]), color="darkorange1", size=3 ) +
+  geom_point(aes(x=Var1, y=comparelevel()[,3]+comparelevel()[,4]+comparelevel()[,5]), color="mediumturquoise", size=3 ) +
+  #geom_point(aes(x=Var1, y=comparelevel()[,3]+comparelevel()[,4]+comparelevel()[,5]+comparelevel()[,6]), color="violetred1", size=3 ) +
+  geom_point(aes(x=Var1, y=1), color="violetred1", size=3 ) +
+  coord_flip()+
+  theme_ipsum(grid = F, axis = F, base_size = 12)+
+  theme(
+    legend.position = "right",
+  ) +
+  xlab("country") +
+  ylab("LEED level: percentage of certified, silver, gold, platinum") + 
+  #annotate(geom="text", x="US", y=c(0.24, 0.57, 0.86, 0.95), label= c("certified", "silver", "gold", "platinum"),size = 4, color=c("green4","darkorange1","mediumturquoise","violetred1")) +   
+  geom_hline(yintercept = avelevelcum(), linetype = "dotted", size=0.6, color=c("green4","darkorange1","mediumturquoise")) 
+})
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+US_Map {data-orientation=columns data-icon="fa-globe-americas" data-navmenu="BY_country"}
+=====================================  
+```{r include = FALSE}
+USgb <- subset(data, Country=="US" & IsCertified == "Yes")
+sep_CertDate <- data.frame(USgb$CertDate, stringsAsFactors = FALSE)
+sep_CertDate <- sep_CertDate %>% separate(USgb.CertDate, sep="-", into = c("year", "month", "day"))
+USgb$certyear <- sep_CertDate$year
+USgb$certmonth <- sep_CertDate$month
+```
+
+```{r include = FALSE}
+#readin US state_sf data (has state code & name,used as temp for matching US state code in the USGBC input)
+library(tigris) 
+us_states <- states(cb = TRUE)
+```
+
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+<br>
+Currently, state-level data can be visualized for the US and China, you can select time periods to display the map. 
+```{r}
+sliderInput("US_chooseyear", "Select time periods (single year or multiple continuous periods):",
+                  min = 2000, max = lubridate::year(Sys.time()),
+                  value = c(2018,2021))
+```
+Note: In the select_year slider, you can choose continuous periods (e.g., 2008-2018), or a single year just put the slider into the same year range. Alternatively, if you prefer to observe ALL cumulative results, just select the whole range (i.e., 2000 to the current year))
+
+```{r}
+selectInput("US_bins_num", label = "How many bins for the map:",
+            choices = c(5,6,7), selected = 6)
+```
+<i><font size="1">Note: maps presented here are directly adopted from third party and the author has no obligation to the rightfulness of the map shown here. </font></i>
+
+
+```{r echo=FALSE}
+usgb_subsetyr <- reactive({
+    as.data.frame(subset(USgb, USgb$certyear %in% seq(input$US_chooseyear[1],input$US_chooseyear[2], 1)))     
+})
+```
+
+```{r echo=FALSE}
+  USgb_subsetyr_bystate <- reactive({as.data.frame(table(usgb_subsetyr()$State))})
+```
+
+```{r echo=FALSE}
+UStotalGSF <- reactive({
+  UStotalGSF <- numeric(length(USgb_subsetyr_bystate()))
+  for (i in 1:nrow(USgb_subsetyr_bystate())) {
+      xxx <- which(usgb_subsetyr()$State == USgb_subsetyr_bystate()$Var1[i])
+      UStotalGSF[i] <- sum(as.numeric(usgb_subsetyr()[xxx,]$GrossFloorArea))
+    }
+  UStotalGSF
+})
+```
+
+```{r echo=FALSE}
+   USgb_yr_GSF <- reactive({
+     cbind(USgb_subsetyr_bystate(), UStotalGSF()) 
+   })
+```
+
+
+Column {data-width=450}
+-----------------------------------------------------------------------
+Key Statistics
+
+### Chart A
+```{r echo=FALSE}
+a <- round(sum(as.numeric(USgb$GrossFloorArea))/10^9,2)
+valueBox(a, caption = paste("Total GSF (in 10^9) of certified bldgs in the US until:", ymd_hms(max(USgb$CertDate))), icon="fa-calendar-check", color = "#fdc23a")
+```
+
+### Chart AA
+```{r echo=FALSE}
+aa <- nrow(USgb)
+valueBox(aa, caption = paste("Total number of certified bldgs in the US until:", ymd_hms(max(USgb$CertDate))), icon="fa-building", color = "#e96449")
+```
+
+### Summary table 
+USGBC certified GB by state, bldg number, and total GSF during selected periods
+```{r echo=FALSE}
+#  renderTable(USgb_yr_GSF())
+US_all_dttable <- reactive({
+  US_all_dttable <- data.frame("State"=USgb_yr_GSF()[,1], "ALL_GB_count"=USgb_yr_GSF()[,2], "ALL_GSF"=USgb_yr_GSF()[,3])
+})
+US_all_dttable_show <- reactive({
+US_all_dttable_show <- US_all_dttable()[complete.cases(US_all_dttable()), ]
+})
+renderTable(US_all_dttable_show())
+```
+
+```{r echo=FALSE}
+#to display GSF
+USGBCGSF_US <- reactive({
+  USGBCGSF_US <- numeric(nrow(us_states))
+  for (i in 1:nrow(us_states)) {
+  if(rlang::is_empty(which(us_states$STUSPS[i] == USgb_yr_GSF()[,1])) == F) {
+    xx <- which(us_states$STUSPS[i] == USgb_yr_GSF()[,1])
+    USGBCGSF_US[i] <- USgb_yr_GSF()[xx,3]
+  } else {
+    USGBCGSF_US[i] <- NA
+  }
+}
+  USGBCGSF_US
+})
+```
+
+```{r echo=FALSE}
+#to display GB count (Freq col2 @ USgb_subsetyr_bystate)
+USGBCall_US <- reactive({
+  USGBCall_US <- numeric(nrow(us_states))
+  for (i in 1:nrow(us_states)) {
+  if(rlang::is_empty(which(us_states$STUSPS[i] == USgb_subsetyr_bystate()[,1])) == F) {
+    xxxx <- which(us_states$STUSPS[i] == USgb_subsetyr_bystate()[,1])
+    USGBCall_US[i] <- USgb_subsetyr_bystate()[xxxx,2]
+  } else {
+    USGBCall_US[i] <- NA
+  }
+}
+  USGBCall_US
+})
+```
+
+
+Column {data-width=950}
+-----------------------------------------------------------------------
+### Map: USGBC certified green buildings (by GSF) for selected years
+```{r echo=FALSE}
+renderLeaflet({
+      if(input$US_bins_num == 7){
+       sixq <- quantile(USGBCGSF_US(), probs = seq(0, 1, 0.15), na.rm = TRUE)
+       bins <- c(0, sixq[2],sixq[3], sixq[4], sixq[5], sixq[6], sixq[7], Inf)
+     }else if(input$US_bins_num == 6){
+        sixq <- quantile(USGBCGSF_US(), probs = seq(0, 1, 0.18), na.rm = TRUE)
+        bins <- c(0, sixq[2],sixq[3], sixq[4], sixq[5], sixq[6], Inf)
+        }else{
+           sixq <- quantile(USGBCGSF_US(), probs = seq(0, 1, 0.21), na.rm = TRUE)
+           bins <- c(0, sixq[2],sixq[3], sixq[4], sixq[5], Inf)
+           }
+      pal <- colorBin("YlOrRd", domain = as.numeric(USGBCGSF_US()), na.color = "#808080", bins = bins)
+
+      USmytext <- paste(
+        "State: ", us_states$STUSPS,"<br/>",
+        "GSF: ", round(USGBCGSF_US(),0), "<br/>",
+        sep="") %>%
+        lapply(htmltools::HTML)
+
+      leaflet(us_states) %>%
+        setView(-96, 37.8, 4) %>%
+        addPolygons(
+          fillColor = ~pal(USGBCGSF_US()),
+          weight = 2,
+          opacity = 1,
+          color = "white",
+          dashArray = "3",
+          fillOpacity = 0.7,
+          label = USmytext,
+          labelOptions = labelOptions(
+            style = list("font-weight" = "normal", padding = "3px 8px"),
+            textsize = "15px",
+            direction = "auto"))   %>%
+        # addControl(paste("source: https://www.usgbc.org/projects up-to-date:", ymd_hms(max(USgb$CertDate))), position = "bottomleft") %>%
+            leaflet::addControl("source: https://www.usgbc.org/projects", position = "bottomleft") %>%
+            leaflet::addLegend(pal = pal, values = round(USGBCGSF_US(),0), opacity = 0.7, title = paste("certified GB (GSF) from", paste(min(input$US_chooseyear), "to",max(input$US_chooseyear), collapse = "")), position = "bottomright")
+    })
+```
+
+
+### Map: USGBC certified green buildings (by numbers) for selected years
+```{r  echo=FALSE}
+renderLeaflet({
+    if(input$US_bins_num == 7){
+       sixq <- quantile(USGBCall_US(), probs = seq(0, 1, 0.15), na.rm = TRUE)
+       bins <- c(0, sixq[2],sixq[3], sixq[4], sixq[5], sixq[6], sixq[7], Inf)
+     }else if(input$US_bins_num == 6){
+        sixq <- quantile(USGBCall_US(), probs = seq(0, 1, 0.18), na.rm = TRUE)
+        bins <- c(0, sixq[2],sixq[3], sixq[4], sixq[5], sixq[6], Inf)
+        }else{
+           sixq <- quantile(USGBCall_US(), probs = seq(0, 1, 0.21), na.rm = TRUE)
+           bins <- c(0, sixq[2],sixq[3], sixq[4], sixq[5], Inf)
+           }
+      pal <- colorBin("YlOrRd", domain = as.numeric(USGBCall_US()), bins = bins)
+
+      USmytext2 <- paste(
+        "State: ", us_states$STUSPS,"<br/>",
+        "Numbers: ", round(USGBCall_US(),0), "<br/>",
+        sep="") %>%
+        lapply(htmltools::HTML)
+
+      leaflet(us_states) %>%
+        setView(-96, 37.8, 4) %>%
+        addPolygons(
+          fillColor = ~pal(USGBCall_US()),
+          weight = 2,
+          opacity = 1,
+          color = "white",
+          dashArray = "3",
+          fillOpacity = 0.7,
+          label = USmytext2,
+          labelOptions = labelOptions(
+            style = list("font-weight" = "normal", padding = "3px 8px"),
+            textsize = "15px",
+            direction = "auto"))   %>%
+        # addControl(paste("source: https://www.usgbc.org/projects up-to-date:", ymd_hms(max(USgb$CertDate))), position = "bottomleft") %>%
+        leaflet::addControl("source: https://www.usgbc.org/projects", position = "bottomleft") %>%
+        leaflet::addLegend(pal = pal, values = round(USGBCall_US(),0), opacity = 0.7, title = paste("certified GB (numbers) from", paste(min(input$US_chooseyear), "to",max(input$US_chooseyear), collapse = "")), position = "bottomright")
+    })
+```
+
+
+
+
+
+
+
+
+CN_Map {data-orientation=columns data-icon="fa-globe-asia" data-navmenu="BY_country"}
+=====================================
+
+```{r include = FALSE}
+CNgb <- subset(data, Country=="CN" & IsCertified == "Yes")
+CNgb_ALLbystate <- as.data.frame(table(CNgb$State))
+sep_CertDate <- data.frame(CNgb$CertDate, stringsAsFactors = FALSE)
+sep_CertDate <- sep_CertDate %>% separate(CNgb.CertDate, sep="-", into = c("year", "month", "day"))
+CNgb$certyear <- sep_CertDate$year
+CNgb$certmonth <- sep_CertDate$month
+```
+
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+### Input Parameters
+USGBC data (ALL, up-to-date) has been imported, now select time periods to display the map.
+```{r}
+sliderInput("CNchooseyear", "Select time periods (single year or multiple continuous periods) :",
+                  min = 2000, max = lubridate::year(Sys.time()),
+                  value = c(2018,2021))
+```
+Note: In the select_year slider, you can choose continuous periods (e.g., 2008-2018), or a single year just put the slider into the same year range. Alternatively, if you prefer to observe ALL cumulative results, just select the whole range (i.e., 2000 to the current year)).
+
+
+```{r echo=FALSE}
+CNgb_subsetyr <- reactive({
+    as.data.frame(subset(CNgb, CNgb$certyear %in% seq(input$CNchooseyear[1],input$CNchooseyear[2], 1)))     
+})
+```
+
+```{r echo=FALSE}
+  CNgb_subsetyr_bystate <- reactive({as.data.frame(table(CNgb_subsetyr()$State))})
+```
+
+
+```{r echo=FALSE}
+CN_allGSF_subsetyr <- reactive({
+  CN_allGSF_subsetyr <- numeric(nrow(china))
+  for (i in 1:nrow(china)) {
+  if(rlang::is_empty(which(china$Engname[i] == CNgb_subsetyr_bystate()[,1])) == F) {
+    gsl <- which(china$Engname[i] == CNgb$State)
+    CN_allGSF_subsetyr[i] = sum(as.numeric(CNgb[gsl,]$GrossFloorArea))
+  } else {
+    CN_allGSF_subsetyr[i] <- NA
+  }
+}
+CN_allGSF_subsetyr
+})
+```
+
+
+```{r echo=FALSE}
+CN_allGBcount_subsetyr <- reactive({
+  CN_allGBcount_subsetyr <- numeric(nrow(china))
+  for (i in 1:nrow(china)) {
+    if(rlang::is_empty(which(china$Engname[i] == CNgb_subsetyr_bystate()[,1])) == F) {
+      CN_allGBcount_subsetyr[i] = CNgb_subsetyr_bystate()[which(china$Engname[i] == CNgb_subsetyr_bystate()[,1]),2]
+    } else {
+      CN_allGBcount_subsetyr[i] <- NA
+    }
+  }
+  CN_allGBcount_subsetyr
+})
+```
+
+
+
+Column {data-width=450}
+-----------------------------------------------------------------------
+Key Statistics
+
+### Chart A
+```{r echo=FALSE}
+a <- round(sum(as.numeric(CNgb$GrossFloorArea))/10^6,2)
+valueBox(a, caption = paste("Total GSF (in 10^6) of certified bldgs in China until:", ymd_hms(max(CNgb$CertDate))), icon="fa-calendar-check", color = "#fdc23a")
+```
+
+### Chart AA
+```{r echo=FALSE}
+aa <- nrow(CNgb)
+valueBox(aa, caption = paste("Total number of certified bldgs in China until:", ymd_hms(max(CNgb$CertDate))), icon="fa-building", color = "#e96449")
+```
+
+### Summary table 
+USGBC certified GB by state, bldg number, and total GSF during selected periods
+```{r echo=FALSE}
+CN_all_dttable <- reactive({CN_all_dttable <- cbind(china$Engname, CN_allGBcount_subsetyr(), CN_allGSF_subsetyr())})
+CN_all_dttable_show <- reactive({ 
+  CN_all_dttable_show <- data.frame("Province" = CN_all_dttable()[,1], "ALL_GB_count"= CN_all_dttable()[,2], "ALL_GSF" = CN_all_dttable()[,3])
+})
+renderTable(CN_all_dttable_show())
+```
+
+```{r echo=FALSE}
+CNcountmap <- reactive({ 
+  hchinamap(name = china$name, value = CN_allGBcount_subsetyr(),
+          width = "100%", height = "600px", 
+          itermName = "Total#", 
+          region = "China")
+})
+```
+
+```{r echo=FALSE}
+CNGSFmap <- reactive({ 
+  hchinamap(name = china$name, value = CN_allGSF_subsetyr(),
+          width = "100%", height = "600px", minColor = "white",
+          itermName = "Total_GSF",
+          region = "China")
+})
+```
+
+
+Column {data-width=950}
+-----------------------------------------------------------------------
+### Map: USGBC certified green buildings (by GSF) for selected years
+```{r echo=FALSE}
+renderHchinamap({
+  CNGSFmap()
+})
+```
+
+### Map: USGBC certified green buildings (by numbers) for selected years
+```{r echo=FALSE}
+renderHchinamap({
+  CNcountmap() 
+  })
+```
